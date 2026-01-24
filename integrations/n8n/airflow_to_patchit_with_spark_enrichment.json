@@ -1,0 +1,216 @@
+{
+  "name": "Airflow Failure → Spark Enrichment → PATCHIT ingest",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "airflow-failure",
+        "httpMethod": "POST",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "WebhookAirflow",
+      "name": "Webhook (Airflow failure payload)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "sparkRunUrl",
+              "value": "={{ (() => { const root = $json || {}; let body = root.body; if (typeof body === 'string') { try { body = JSON.parse(body); } catch (e) {} } const md = (root.metadata || (body && body.metadata) || {}); return String(root.spark_run_url || (body && body.spark_run_url) || md.spark_run_url || '').trim(); })() }}"
+            },
+            {
+              "name": "patchitIngestUrl",
+              "value": "={{ (() => { const root = $json || {}; let body = root.body; if (typeof body === 'string') { try { body = JSON.parse(body); } catch (e) {} } const md = (root.metadata || (body && body.metadata) || {}); return String(root.patchit_ingest_url || (body && body.patchit_ingest_url) || md.patchit_ingest_url || '').trim(); })() }}"
+            },
+            {
+              "name": "event_id",
+              "value": "={{ (() => { const root = $json || {}; let body = root.body; if (typeof body === 'string') { try { body = JSON.parse(body); } catch (e) {} } return String(root.event_id || (body && body.event_id) || 'unknown').trim(); })() }}"
+            },
+            {
+              "name": "pipeline_id",
+              "value": "={{ (() => { const root = $json || {}; let body = root.body; if (typeof body === 'string') { try { body = JSON.parse(body); } catch (e) {} } return String(root.pipeline_id || (body && body.pipeline_id) || 'unknown').trim(); })() }}"
+            },
+            {
+              "name": "run_id",
+              "value": "={{ (() => { const root = $json || {}; let body = root.body; if (typeof body === 'string') { try { body = JSON.parse(body); } catch (e) {} } return String(root.run_id || (body && body.run_id) || 'unknown').trim(); })() }}"
+            },
+            {
+              "name": "task_id",
+              "value": "={{ (() => { const root = $json || {}; let body = root.body; if (typeof body === 'string') { try { body = JSON.parse(body); } catch (e) {} } return String(root.task_id || (body && body.task_id) || 'unknown').trim(); })() }}"
+            },
+            {
+              "name": "metadata_json",
+              "value": "={{ (() => { const root = $json || {}; let body = root.body; if (typeof body === 'string') { try { body = JSON.parse(body); } catch (e) {} } return JSON.stringify(root.metadata || (body && body.metadata) || {}); })() }}"
+            },
+            {
+              "name": "log_uri",
+              "value": "={{ (() => { const root = $json || {}; let body = root.body; if (typeof body === 'string') { try { body = JSON.parse(body); } catch (e) {} } return String(root.log_uri || (body && body.log_uri) || 'file:///opt/airflow/logs/placeholder.log').trim(); })() }}"
+            }
+          ]
+        },
+        "options": { "keepOnlySet": true }
+      },
+      "id": "ExtractSparkUrl",
+      "name": "Extract URLs + IDs",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [430, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.sparkRunUrl}}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "IfSpark",
+      "name": "IF Spark run URL present",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{$json.sparkRunUrl}}",
+        "method": "GET",
+        "authentication": "none",
+        "options": {}
+      },
+      "id": "FetchSpark",
+      "name": "Fetch Spark run output (HTTP)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [880, 220]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "spark_log_text",
+              "value": "={{ JSON.stringify($json) }}"
+            }
+          ]
+        },
+        "options": { "keepOnlySet": false }
+      },
+      "id": "PackSpark",
+      "name": "Pack Spark log text into payload",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [1100, 220]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "spark_log_text",
+              "value": "={{ $json.spark_log_text || '' }}"
+            }
+          ]
+        },
+        "options": { "keepOnlySet": false }
+      },
+      "id": "EnsureSparkLogText",
+      "name": "Ensure spark_log_text exists",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [1100, 380]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ (() => { const extracted = $node['Extract URLs + IDs'].json || {}; const raw = extracted.patchitIngestUrl || ''; const base = String(raw || '').trim(); if (!base) return ''; if (/^https?:\\/\\/[^\\/]+\\/.+/.test(base)) return base; if (base.includes('/events/ingest')) return base; const noTrail = base.endsWith('/') ? base.slice(0, -1) : base; return noTrail + '/events/ingest'; })() }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "event_id",
+              "value": "={{ $node['Extract URLs + IDs'].json.event_id || 'unknown' }}"
+            },
+            {
+              "name": "platform",
+              "value": "airflow"
+            },
+            {
+              "name": "pipeline_id",
+              "value": "={{ $node['Extract URLs + IDs'].json.pipeline_id || 'unknown' }}"
+            },
+            {
+              "name": "run_id",
+              "value": "={{ $node['Extract URLs + IDs'].json.run_id || 'unknown' }}"
+            },
+            {
+              "name": "task_id",
+              "value": "={{ $node['Extract URLs + IDs'].json.task_id || 'unknown' }}"
+            },
+            {
+              "name": "artifact_uris",
+              "value": "={{ [] }}"
+            },
+            {
+              "name": "log_uri",
+              "value": "={{ $node['Extract URLs + IDs'].json.log_uri || 'file:///opt/airflow/logs/placeholder.log' }}"
+            },
+            {
+              "name": "metadata",
+              "value": "={{ (() => { try { const base = JSON.parse($node['Extract URLs + IDs'].json.metadata_json || '{}'); base.spark_log_text = $json.spark_log_text || ''; return base; } catch(e) { return { spark_log_text: $json.spark_log_text || '' }; } })() }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "CallPATCHIT",
+      "name": "Call PATCHIT ingest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1330, 300]
+    }
+  ],
+  "connections": {
+    "Webhook (Airflow failure payload)": {
+      "main": [[{ "node": "Extract URLs + IDs", "type": "main", "index": 0 }]]
+    },
+    "Extract URLs + IDs": {
+      "main": [[{ "node": "IF Spark run URL present", "type": "main", "index": 0 }]]
+    },
+    "IF Spark run URL present": {
+      "main": [
+        [{ "node": "Fetch Spark run output (HTTP)", "type": "main", "index": 0 }],
+        [{ "node": "Ensure spark_log_text exists", "type": "main", "index": 0 }]
+      ]
+    },
+    "Fetch Spark run output (HTTP)": {
+      "main": [[{ "node": "Pack Spark log text into payload", "type": "main", "index": 0 }]]
+    },
+    "Pack Spark log text into payload": {
+      "main": [[{ "node": "Ensure spark_log_text exists", "type": "main", "index": 0 }]]
+    },
+    "Ensure spark_log_text exists": {
+      "main": [[{ "node": "Call PATCHIT ingest", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "4"
+}

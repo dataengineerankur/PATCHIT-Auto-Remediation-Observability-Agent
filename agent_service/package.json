@@ -1,0 +1,11 @@
+{
+  "name": "ardoa-agent-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "bytez.js": "latest"
+  }
+}
+
+

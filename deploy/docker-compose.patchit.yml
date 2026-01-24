@@ -1,0 +1,43 @@
+services:
+  patchit:
+    build:
+      context: ..
+      dockerfile: service.Dockerfile
+    environment:
+      # NOTE: In production, prefer providing these via env/secret manager.
+      PATCHIT_PUBLIC_BASE_URL: "http://localhost:8088"
+      PATCHIT_AUDIT_LOG_PATH: "/opt/patchit/var/audit/patchit_audit.jsonl"
+      PATCHIT_AGENT_MODE: "inhouse"
+      PATCHIT_INHOUSE_AGENT_URL: ${PATCHIT_INHOUSE_AGENT_URL}
+      PATCHIT_INHOUSE_API_KEY: ${PATCHIT_INHOUSE_API_KEY}
+      PATCHIT_INHOUSE_HEADERS_JSON: ${PATCHIT_INHOUSE_HEADERS_JSON}
+      # Optional: GitHub PRs
+      PATCHIT_GITHUB_MODE: ${PATCHIT_GITHUB_MODE:-mock}
+      PATCHIT_GITHUB_TOKEN: ${PATCHIT_GITHUB_TOKEN}
+      PATCHIT_GITHUB_REPO: ${PATCHIT_GITHUB_REPO}
+      # Optional: Airflow poller
+      PATCHIT_AIRFLOW_POLLER_ENABLED: ${PATCHIT_AIRFLOW_POLLER_ENABLED:-false}
+      PATCHIT_AIRFLOW_BASE_URL: ${PATCHIT_AIRFLOW_BASE_URL}
+      PATCHIT_AIRFLOW_USERNAME: ${PATCHIT_AIRFLOW_USERNAME}
+      PATCHIT_AIRFLOW_PASSWORD: ${PATCHIT_AIRFLOW_PASSWORD}
+    volumes:
+      # Persist audit/evidence/reports on your laptop (means you KEEP history across restarts).
+      - ../var:/opt/patchit/var
+      # Mount your checked-out repo so PATCHIT can index + patch it in local-worktree mode.
+      - ../:/opt/patchit/repo:rw
+      # Optional: allow local worktree + docker-based validation from inside PATCHIT container (macOS needs correct socket).
+      # - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "127.0.0.1:${PATCHIT_PORT:-8088}:8088"
+      - "127.0.0.1:${PATCHIT_UI_PORT:-8089}:8088"
+
+  patchit-agent:
+    build:
+      context: ..
+      dockerfile: agent_service/Dockerfile
+    environment:
+      BYTEZ_API_KEY: ${BYTEZ_API_KEY}
+      BYTEZ_MODEL: "anthropic/claude-sonnet-4-5"
+      AGENT_PORT: "8098"
+    ports:
+      - "127.0.0.1:${PATCHIT_AGENT_PORT:-8098}:8098"

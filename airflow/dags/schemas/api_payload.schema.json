@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mock API Payload Contract",
+  "type": "object",
+  "properties": {
+    "eventTime": { "type": "string" },
+    "runId": { "type": "string" },
+    "items": { "type": "array" },
+    "amount": { "type": ["number", "null"] },
+    "userId": { "type": ["string", "null"] },
+    "user_id": { "type": ["string", "null"] }
+  },
+  "required": ["eventTime", "runId", "items"],
+  "anyOf": [
+    { "required": ["userId"] },
+    { "required": ["user_id"] }
+  ]
+}
+
+
+

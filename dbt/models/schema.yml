@@ -1,0 +1,15 @@
+version: 2
+
+models:
+  - name: stg_api_payload
+    description: "Staged API payload into analytics schema"
+    columns:
+      - name: run_id
+        tests:
+          - not_null
+      - name: user_id
+        tests:
+          - not_null
+
+
+

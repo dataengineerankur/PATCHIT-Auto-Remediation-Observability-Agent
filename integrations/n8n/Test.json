@@ -1,0 +1,14 @@
+(dataengineer-transformations-python-py3.9) (base) ankurchopra@MacBookPro airflow % curl -X POST 'https://patchit.app.n8n.cloud/webhook/airflow-failure' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "event_id":"airflow:test:1",
+    "pipeline_id":"enterprise_spark_submit_dag",
+    "run_id":"manual__test",
+    "task_id":"spark_submit_job",
+    "artifact_uris":[],
+    "metadata":{
+      "patchit_ingest_url":"https://wings-ali-thousands-doubt.trycloudflare.com",
+      "spark_run_url":"https://httpbin.org/get"
+    }
+  }'
+{"code":404,"message":"The requested webhook \"POST airflow-failure\" is not registered.","hint":"The workflow must be active for a production URL to run successfully. You can activate the workflow using the toggle in the top-right of the editor. Note that unlike test URL calls, production URL calls aren't shown on the canvas (only in the executions list)"}%     

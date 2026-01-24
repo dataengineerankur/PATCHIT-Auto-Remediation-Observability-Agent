@@ -1,0 +1,68 @@
+Metadata-Version: 2.4
+Name: ardoa
+Version: 0.1.0
+Summary: Auto-Remediation Data Observability Agent (Phase-1 MVP)
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi==0.115.6
+Requires-Dist: uvicorn[standard]==0.34.0
+Requires-Dist: pydantic==2.10.4
+Requires-Dist: pydantic-settings==2.7.0
+Requires-Dist: httpx==0.28.1
+Requires-Dist: python-json-logger==3.2.1
+Requires-Dist: jsonschema==4.23.0
+Requires-Dist: PyYAML==6.0.2
+Provides-Extra: dev
+Requires-Dist: pytest==8.3.4; extra == "dev"
+Requires-Dist: pytest-asyncio==0.25.0; extra == "dev"
+Requires-Dist: pytest-cov==6.0.0; extra == "dev"
+Provides-Extra: airflow
+Requires-Dist: apache-airflow==2.9.3; extra == "airflow"
+Provides-Extra: dbt
+Requires-Dist: dbt-core==1.9.0; extra == "dbt"
+Requires-Dist: dbt-duckdb==1.9.1; extra == "dbt"
+Requires-Dist: duckdb==1.1.3; extra == "dbt"
+
+## ARDOA (Auto-Remediation Data Observability Agent) — Phase-1 MVP
+
+ARDOA detects pipeline failures (Airflow-first; dbt optional), normalizes errors, collects code/log context, proposes a minimal safe patch, and opens a PR (mock or real) with guardrails + audit logs.
+
+### Quickstart (local, no SaaS)
+
+#### 1) Create a venv + install
+
+```bash
+cd /Users/ankurchopra/repo_projects/Auto-Remediation-Data-Observability-Agent-
+python -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -e ".[dev]"
+```
+
+#### 2) Run ARDOA service
+
+```bash
+export ARDOA_AUDIT_LOG_PATH="$(pwd)/var/audit/ardoa_audit.jsonl"
+export ARDOA_GITHUB_MODE="mock"
+export ARDOA_GITHUB_REPO="local/mock"
+uvicorn ardoa.service.app:app --host 0.0.0.0 --port 8088 --reload
+```
+
+#### 3) Run tests
+
+```bash
+pytest
+```
+
+### Airflow + Mock API (docker-compose)
+
+See `airflow/README.md` for exact commands and the demo runbook.
+
+### Environment variables
+
+- **ARDOA_GITHUB_MODE**: `mock` (default) or `real`
+- **ARDOA_GITHUB_TOKEN**: required if `real`
+- **ARDOA_GITHUB_REPO**: `owner/repo` if `real`
+- **ARDOA_AUDIT_LOG_PATH**: JSONL audit log output path
+
+

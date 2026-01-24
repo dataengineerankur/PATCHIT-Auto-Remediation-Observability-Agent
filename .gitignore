@@ -1,0 +1,56 @@
+# ---------------------------
+# PATCHIT: safe-to-push ignores
+# ---------------------------
+
+# Secrets / local env
+.env
+**/.env
+**/*.env
+deploy/patchit.env
+
+# Python
+__pycache__/
+**/__pycache__/
+*.pyc
+**/*.pyc
+*.pyo
+**/*.pyo
+*.pyd
+**/*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Build / packaging
+dist/
+build/
+*.egg-info/
+
+# PATCHIT runtime data (contains credentials + audit trails + evidence)
+var/
+
+# Mock PR artifacts (demo-only; can contain diffs/logs)
+.mock_github/
+
+# Airflow runtime state (VERY large + may include secrets)
+airflow/logs/
+airflow/data/
+airflow/pgdata/
+
+# dbt build outputs/logs
+dbt/target/
+dbt/logs/
+
+# Local-only artifacts
+**/*.sqlite3
+**/*.duckdb
+**/*.diff
+**/*.log
+
+# OS/editor noise
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/

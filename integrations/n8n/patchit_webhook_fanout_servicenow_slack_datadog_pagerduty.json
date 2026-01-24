@@ -1,0 +1,203 @@
+{
+  "name": "PATCHIT → (Slack + ServiceNow + Datadog + PagerDuty) fanout",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "patchit",
+        "httpMethod": "POST",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "Webhook",
+      "name": "PATCHIT Webhook (from PATCHIT IntegrationEmitter)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "propertyName": "event_type",
+        "rules": [
+          { "operation": "equal", "value": "pr.created" },
+          { "operation": "equal", "value": "remediation.escalated" },
+          { "operation": "equal", "value": "policy.decided" },
+          { "operation": "equal", "value": "agent.failed" },
+          { "operation": "equal", "value": "evidence.saved" },
+          { "operation": "equal", "value": "report.saved" }
+        ]
+      },
+      "id": "Switch",
+      "name": "Switch by event_type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 2,
+      "position": [430, 300]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "text",
+              "value": "✅ PATCHIT created a PR for {{$json.payload.event.pipeline_id}} / {{$json.payload.event.task_id}}\\nCorrelation: {{$json.correlation_id}}\\nEvidence: {{$json.payload.links.evidence}}\\nPR: {{$json.payload.audit.payload.pr.pr_url || $json.payload.audit.payload.pr_url || 'see audit payload'}}"
+            }
+          ]
+        }
+      },
+      "id": "SlackMsgPR",
+      "name": "Format Slack msg (PR created)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [690, 120]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.SLACK_WEBHOOK_URL}}",
+        "method": "POST",
+        "sendBody": true,
+        "jsonBody": "={\"text\": $json.text}",
+        "options": {}
+      },
+      "id": "SlackWebhook",
+      "name": "Slack (Incoming Webhook)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [940, 120]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "short_description",
+              "value": "[PATCHIT] Escalation: {{$json.payload.event.pipeline_id}} / {{$json.payload.event.task_id}}"
+            },
+            {
+              "name": "description",
+              "value": "PATCHIT escalated remediation.\\nCorrelation: {{$json.correlation_id}}\\nEvidence: {{$json.payload.links.evidence}}\\nEvent: {{$json.payload.event.pipeline_id}} run={{$json.payload.event.run_id}} task={{$json.payload.event.task_id}}\\nRaw: {{$json.payload.audit.payload.report || JSON.stringify($json.payload.audit.payload)}}"
+            }
+          ]
+        }
+      },
+      "id": "ServiceNowPrep",
+      "name": "Prepare ServiceNow incident payload",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.SERVICENOW_INSTANCE_URL + '/api/now/table/incident'}}",
+        "method": "POST",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "serviceNowOAuth2Api",
+        "sendBody": true,
+        "jsonBody": "={\"short_description\": $json.short_description, \"description\": $json.description, \"category\": \"software\"}",
+        "options": {}
+      },
+      "id": "ServiceNowCreate",
+      "name": "ServiceNow: Create Incident",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [940, 300]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "title",
+              "value": "PATCHIT Incident Update: {{$json.payload.event.pipeline_id}} / {{$json.payload.event.task_id}}"
+            },
+            {
+              "name": "text",
+              "value": "event_type={{$json.event_type}} correlation={{$json.correlation_id}} evidence={{$json.payload.links.evidence}}"
+            }
+          ]
+        }
+      },
+      "id": "DatadogPrep",
+      "name": "Prepare Datadog event",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [690, 480]
+    },
+    {
+      "parameters": {
+        "url": "https://api.datadoghq.com/api/v1/events",
+        "method": "POST",
+        "sendBody": true,
+        "headerParametersJson": "={\"DD-API-KEY\": $env.DD_API_KEY, \"DD-APPLICATION-KEY\": $env.DD_APP_KEY}",
+        "jsonBody": "={\"title\": $json.title, \"text\": $json.text, \"tags\": [\"source:patchit\", \"pipeline:\" + $json.payload.event.pipeline_id]}",
+        "options": {}
+      },
+      "id": "DatadogEvent",
+      "name": "Datadog: Create Event",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [940, 480]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            { "name": "routing_key", "value": "={{$env.PAGERDUTY_ROUTING_KEY}}" },
+            { "name": "summary", "value": "PATCHIT escalation: {{$json.payload.event.pipeline_id}}/{{$json.payload.event.task_id}} ({{$json.correlation_id}})" },
+            { "name": "source", "value": "patchit" },
+            { "name": "severity", "value": "error" }
+          ]
+        }
+      },
+      "id": "PDPrep",
+      "name": "Prepare PagerDuty trigger",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [690, 650]
+    },
+    {
+      "parameters": {
+        "url": "https://events.pagerduty.com/v2/enqueue",
+        "method": "POST",
+        "sendBody": true,
+        "jsonBody": "={\"routing_key\": $json.routing_key, \"event_action\": \"trigger\", \"payload\": {\"summary\": $json.summary, \"source\": $json.source, \"severity\": $json.severity, \"custom_details\": $json.payload}}",
+        "options": {}
+      },
+      "id": "PagerDutyTrigger",
+      "name": "PagerDuty: Trigger Incident (Events v2)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [940, 650]
+    }
+  ],
+  "connections": {
+    "PATCHIT Webhook (from PATCHIT IntegrationEmitter)": {
+      "main": [[{ "node": "Switch by event_type", "type": "main", "index": 0 }]]
+    },
+    "Switch by event_type": {
+      "main": [
+        [{ "node": "Format Slack msg (PR created)", "type": "main", "index": 0 }],
+        [{ "node": "Prepare ServiceNow incident payload", "type": "main", "index": 0 }],
+        [{ "node": "Prepare Datadog event", "type": "main", "index": 0 }],
+        [{ "node": "Prepare Datadog event", "type": "main", "index": 0 }],
+        [{ "node": "Prepare Datadog event", "type": "main", "index": 0 }],
+        [{ "node": "Prepare Datadog event", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format Slack msg (PR created)": {
+      "main": [[{ "node": "Slack (Incoming Webhook)", "type": "main", "index": 0 }]]
+    },
+    "Prepare ServiceNow incident payload": {
+      "main": [[{ "node": "ServiceNow: Create Incident", "type": "main", "index": 0 }]]
+    },
+    "Prepare Datadog event": {
+      "main": [[{ "node": "Datadog: Create Event", "type": "main", "index": 0 }]]
+    },
+    "Prepare PagerDuty trigger": {
+      "main": [[{ "node": "PagerDuty: Trigger Incident (Events v2)", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "1"
+}
+
+

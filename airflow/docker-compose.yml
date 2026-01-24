@@ -1,0 +1,163 @@
+services:
+  patchit-agent:
+    build:
+      context: ..
+      dockerfile: agent_service/Dockerfile
+    environment:
+      # REQUIRED: export BYTEZ_API_KEY in your shell before `docker compose up`
+      BYTEZ_API_KEY: ${BYTEZ_API_KEY}
+      BYTEZ_MODEL: "anthropic/claude-sonnet-4-5"
+      AGENT_PORT: "8098"
+    ports:
+      - "127.0.0.1:8098:8098"
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+
+  mock_api:
+    build:
+      context: ..
+      dockerfile: mock_api/Dockerfile
+    ports:
+      - "127.0.0.1:8099:8099"
+
+  patchit:
+    build:
+      context: ..
+      dockerfile: service.Dockerfile
+    env_file:
+      - ./.env
+    environment:
+      PATCHIT_GITHUB_MODE: "real"
+      PATCHIT_AUDIT_LOG_PATH: "/opt/patchit/var/audit/patchit_audit.jsonl"
+      PATCHIT_GITHUB_TOKEN: ${PATCHIT_GITHUB_TOKEN}
+      PATCHIT_GITHUB_REPO: ${PATCHIT_GITHUB_REPO}
+      PATCHIT_CURSOR_API_KEY: ${PATCHIT_CURSOR_API_KEY}
+      PATCHIT_CURSOR_REPOSITORY: ${PATCHIT_CURSOR_REPOSITORY}
+      PATCHIT_CODE_TRANSLATE_FROM: "/opt/airflow/dags"
+      PATCHIT_CODE_TRANSLATE_TO: "/opt/patchit/repo/airflow/dags"
+      PATCHIT_PUBLIC_BASE_URL: "http://localhost:8088"
+      PATCHIT_REPO_REGISTRY_JSON: >-
+        [
+          {"key":"airflow","pipeline_id_regex":"^airflow","stack_path_regexes":["/opt/patchit/repo/airflow_repo/"],"repo_root":"/opt/patchit/repo/airflow_repo","github_repo":"dataengineerankur/2-10-example-dags","cursor_repository":"https://github.com/dataengineerankur/2-10-example-dags","github_base_branch":"main"},
+          {"key":"dbt","pipeline_id_regex":"^dbt","stack_path_regexes":["/opt/patchit/repo/dbt_repo/"],"repo_root":"/opt/patchit/repo/dbt_repo","github_repo":"dataengineerankur/jaffle_shop_duckdb","cursor_repository":"https://github.com/dataengineerankur/jaffle_shop_duckdb","github_base_branch":"duckdb"},
+          {"key":"spark","pipeline_id_regex":"^spark","stack_path_regexes":["/opt/patchit/repo/spark_repo/"],"repo_root":"/opt/patchit/repo/spark_repo","github_repo":"dataengineerankur/pyspark-example-project","cursor_repository":"https://github.com/dataengineerankur/pyspark-example-project","github_base_branch":"master"},
+          {"key":"swebench","pipeline_id_regex":"^swebench","stack_path_regexes":["/opt/patchit/repo/swebench_repo/"],"repo_root":"/opt/patchit/repo/swebench_repo","github_repo":"dataengineerankur/SWE-bench","cursor_repository":"https://github.com/dataengineerankur/SWE-bench","github_base_branch":"main"}
+        ]
+      # LLM provider
+      PATCHIT_AGENT_MODE: "cursor"
+      PATCHIT_CURSOR_AUTO_CREATE_PR: "true"
+      # Optional (recommended) for OpenRouter rankings
+      # PATCHIT_OPENROUTER_SITE_URL: "http://localhost"
+      # PATCHIT_OPENROUTER_SITE_NAME: "PATCHIT Local"
+      # Groq (optional): keep around for fallback experiments, but unused in openrouter mode
+      PATCHIT_GROQ_API_KEY: ${GROQ_API_KEY}
+      PATCHIT_GROQ_MODEL: "openai/gpt-oss-120b"
+      # Converge-to-green: agent is allowed to change failure semantics to make the pipeline pass.
+      PATCHIT_CONVERGE_TO_GREEN: "true"
+      # Agent-only mode: do NOT create PRs from deterministic fallbacks.
+      PATCHIT_ALLOW_DETERMINISTIC_FALLBACK: "false"
+      # Optional fallback:
+      PATCHIT_AGENT_URL: "http://patchit-agent:8098/v1/propose_patch"
+    volumes:
+      - ../var:/opt/patchit/var
+      - ../.mock_github:/opt/patchit/.mock_github
+      - ../:/opt/patchit/repo:rw
+      - ../airflow_extra_dags:/opt/patchit/repo/airflow/dags/extra_dags:rw
+      - /Users/ankurchopra/repo_projects/2-10-example-dags:/opt/patchit/repo/airflow_repo:rw
+      - /Users/ankurchopra/repo_projects/jaffle_shop_duckdb:/opt/patchit/repo/dbt_repo:rw
+      - /Users/ankurchopra/repo_projects/pyspark-example-project:/opt/patchit/repo/spark_repo:rw
+      - /Users/ankurchopra/repo_projects/SWE-bench:/opt/patchit/repo/swebench_repo:rw
+      - /Users/ankurchopra/repo_projects/patchit_drills:/opt/patchit/drills:rw
+    ports:
+      - "127.0.0.1:8088:8088"
+      - "127.0.0.1:8089:8088"
+
+  airflow-init:
+    image: patchit-airflow:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ../airflow_extra_dags:/opt/airflow/dags/extra_dags
+      - ./logs:/opt/airflow/logs
+      - ./data:/opt/airflow/data
+      - ../dbt:/opt/airflow/dbt
+    entrypoint: /bin/bash
+    command: -c "airflow db migrate && airflow users create --username airflow --password airflow --firstname airflow --lastname airflow --role Admin --email airflow@example.com || true"
+
+  airflow-webserver:
+    image: patchit-airflow:latest
+    depends_on:
+      - airflow-init
+      - postgres
+      - mock_api
+      - patchit
+      - patchit-agent
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+      PATCHIT_ENDPOINT: "http://patchit:8088/events/ingest"
+      MOCK_API_BASE_URL: "http://mock_api:8099"
+      PATCHIT_LOGS_TRANSLATE_FROM: "/opt/airflow/logs"
+      PATCHIT_LOGS_TRANSLATE_TO: "/opt/patchit/repo/airflow/logs"
+      PATCHIT_DATA_TRANSLATE_FROM: "/opt/airflow/data"
+      PATCHIT_DATA_TRANSLATE_TO: "/opt/patchit/repo/airflow/data"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ../airflow_extra_dags:/opt/airflow/dags/extra_dags
+      - ./logs:/opt/airflow/logs
+      - ./data:/opt/airflow/data
+      - ../dbt:/opt/airflow/dbt
+    ports:
+      - "127.0.0.1:8080:8080"
+    command: webserver
+
+  airflow-scheduler:
+    image: patchit-airflow:latest
+    depends_on:
+      - airflow-init
+      - postgres
+      - mock_api
+      - patchit
+      - patchit-agent
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
+      PATCHIT_ENDPOINT: "http://patchit:8088/events/ingest"
+      MOCK_API_BASE_URL: "http://mock_api:8099"
+      PATCHIT_LOGS_TRANSLATE_FROM: "/opt/airflow/logs"
+      PATCHIT_LOGS_TRANSLATE_TO: "/opt/patchit/repo/airflow/logs"
+      PATCHIT_DATA_TRANSLATE_FROM: "/opt/airflow/data"
+      PATCHIT_DATA_TRANSLATE_TO: "/opt/patchit/repo/airflow/data"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ../airflow_extra_dags:/opt/airflow/dags/extra_dags
+      - ./logs:/opt/airflow/logs
+      - ./data:/opt/airflow/data
+      - ../dbt:/opt/airflow/dbt
+    command: scheduler
+
+
