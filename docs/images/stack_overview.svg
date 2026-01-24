@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <style>
+      .title{font:700 28px system-ui, -apple-system, Segoe UI, Roboto, Arial; fill:#e5e7eb}
+      .sub{font:500 14px system-ui, -apple-system, Segoe UI, Roboto, Arial; fill:#94a3b8}
+      .box{fill:#0f172a; stroke:#1f2937; stroke-width:2}
+      .h{font:700 16px system-ui, -apple-system, Segoe UI, Roboto, Arial; fill:#e5e7eb}
+      .t{font:500 13px system-ui, -apple-system, Segoe UI, Roboto, Arial; fill:#cbd5f5}
+      .pill{fill:#111827; stroke:#334155; stroke-width:1}
+      .p{font:600 12px system-ui, -apple-system, Segoe UI, Roboto, Arial; fill:#93c5fd}
+      .arrow{stroke:#60a5fa; stroke-width:3; fill:none; marker-end:url(#m)}
+    </style>
+    <marker id="m" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#60a5fa"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="520" rx="18" fill="url(#bg)"/>
+  <text x="34" y="58" class="title">PATCHIT local stacks</text>
+  <text x="34" y="86" class="sub">Two compose files: product-only vs Airflow demo. Both bind ports to 127.0.0.1 by default.</text>
+
+  <!-- Product-only -->
+  <rect x="34" y="120" width="548" height="350" rx="18" class="box"/>
+  <text x="58" y="156" class="h">PATCHIT-only (deploy/docker-compose.patchit.yml)</text>
+
+  <rect x="58" y="185" width="500" height="86" rx="14" class="pill"/>
+  <text x="78" y="214" class="p">patchit</text>
+  <text x="78" y="238" class="t">UI + API (FastAPI)</text>
+  <text x="78" y="260" class="t">Ports: 8088/8089 → container 8088</text>
+
+  <rect x="58" y="286" width="500" height="86" rx="14" class="pill"/>
+  <text x="78" y="315" class="p">patchit-agent (optional)</text>
+  <text x="78" y="339" class="t">Helper agent endpoint</text>
+  <text x="78" y="361" class="t">Port: 8098</text>
+
+  <rect x="58" y="387" width="500" height="58" rx="14" class="pill"/>
+  <text x="78" y="420" class="p">var/</text>
+  <text x="150" y="420" class="t">audit · evidence · reports · memory (persisted on laptop)</text>
+
+  <!-- Demo stack -->
+  <rect x="618" y="120" width="548" height="350" rx="18" class="box"/>
+  <text x="642" y="156" class="h">Airflow demo (airflow/docker-compose.yml)</text>
+
+  <rect x="642" y="185" width="500" height="70" rx="14" class="pill"/>
+  <text x="662" y="214" class="p">airflow-webserver</text>
+  <text x="662" y="238" class="t">UI/API (8080)</text>
+
+  <rect x="642" y="265" width="240" height="70" rx="14" class="pill"/>
+  <text x="662" y="294" class="p">airflow-scheduler</text>
+  <text x="662" y="318" class="t">no host port</text>
+
+  <rect x="902" y="265" width="240" height="70" rx="14" class="pill"/>
+  <text x="922" y="294" class="p">postgres</text>
+  <text x="922" y="318" class="t">airflow metadata</text>
+
+  <rect x="642" y="345" width="240" height="70" rx="14" class="pill"/>
+  <text x="662" y="374" class="p">patchit</text>
+  <text x="662" y="398" class="t">8088/8089</text>
+
+  <rect x="902" y="345" width="240" height="70" rx="14" class="pill"/>
+  <text x="922" y="374" class="p">mock_api</text>
+  <text x="922" y="398" class="t">8099</text>
+
+  <!-- Arrows -->
+  <path class="arrow" d="M760 220 C 760 290, 760 320, 760 360"/>
+  <text x="780" y="302" class="t">failures → ingest</text>
+</svg>

@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <style>
+      .title{font:700 26px system-ui, -apple-system, Segoe UI, Roboto, Arial; fill:#e5e7eb}
+      .sub{font:500 14px system-ui, -apple-system, Segoe UI, Roboto, Arial; fill:#94a3b8}
+      .box{fill:#0f172a; stroke:#1f2937; stroke-width:2}
+      .h{font:700 16px system-ui, -apple-system, Segoe UI, Roboto, Arial; fill:#e5e7eb}
+      .t{font:500 13px system-ui, -apple-system, Segoe UI, Roboto, Arial; fill:#cbd5f5}
+      .tag{fill:#111827; stroke:#334155; stroke-width:1}
+      .p{font:700 12px system-ui, -apple-system, Segoe UI, Roboto, Arial; fill:#93c5fd}
+      .arrow{stroke:#60a5fa; stroke-width:3; fill:none; marker-end:url(#m)}
+    </style>
+    <marker id="m" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#60a5fa"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="420" rx="18" fill="url(#bg)"/>
+  <text x="34" y="58" class="title">PATCHIT agent providers</text>
+  <text x="34" y="86" class="sub">Provider choice controls where evidence/context is sent. Prefer Inhouse for strict data policies.</text>
+
+  <!-- PATCHIT -->
+  <rect x="34" y="120" width="360" height="260" rx="18" class="box"/>
+  <text x="60" y="158" class="h">PATCHIT</text>
+  <text x="60" y="184" class="t">Builds prompt from evidence</text>
+  <text x="60" y="206" class="t">Requests patch proposal</text>
+  <text x="60" y="228" class="t">Applies + validates + PR/local diff</text>
+
+  <rect x="60" y="255" width="300" height="44" rx="12" class="tag"/>
+  <text x="78" y="283" class="p">UI selects provider</text>
+
+  <!-- Providers -->
+  <rect x="430" y="120" width="236" height="260" rx="18" class="box"/>
+  <text x="454" y="158" class="h">Groq</text>
+  <text x="454" y="184" class="t">External LLM</text>
+  <text x="454" y="206" class="t">Fast experiments</text>
+  <rect x="454" y="236" width="188" height="44" rx="12" class="tag"/>
+  <text x="472" y="264" class="p">GROQ_API_KEY</text>
+
+  <rect x="684" y="120" width="236" height="260" rx="18" class="box"/>
+  <text x="708" y="158" class="h">Cursor</text>
+  <text x="708" y="184" class="t">Cloud agent + PR flow</text>
+  <text x="708" y="206" class="t">Needs GitHub compare</text>
+  <rect x="708" y="236" width="188" height="44" rx="12" class="tag"/>
+  <text x="726" y="264" class="p">CURSOR + GH</text>
+
+  <rect x="938" y="120" width="236" height="260" rx="18" class="box"/>
+  <text x="962" y="158" class="h">Inhouse</text>
+  <text x="962" y="184" class="t">Your internal endpoint</text>
+  <text x="962" y="206" class="t">Returns unified diff</text>
+  <rect x="962" y="236" width="188" height="44" rx="12" class="tag"/>
+  <text x="980" y="264" class="p">POST /v1/propose_patch</text>
+
+  <!-- Arrows -->
+  <path class="arrow" d="M394 220 L 430 220"/>
+  <path class="arrow" d="M394 250 L 684 250"/>
+  <path class="arrow" d="M394 280 L 938 280"/>
+</svg>
