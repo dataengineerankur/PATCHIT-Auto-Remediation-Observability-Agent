@@ -3,11 +3,15 @@ services:
     build:
       context: ..
       dockerfile: service.Dockerfile
+      args:
+        BASE_REGISTRY: ${PATCHIT_IMAGE_REGISTRY:-docker.io/library}
+    env_file:
+      - ./patchit.env
     environment:
       # NOTE: In production, prefer providing these via env/secret manager.
       PATCHIT_PUBLIC_BASE_URL: "http://localhost:8088"
       PATCHIT_AUDIT_LOG_PATH: "/opt/patchit/var/audit/patchit_audit.jsonl"
-      PATCHIT_AGENT_MODE: "inhouse"
+      PATCHIT_AGENT_MODE: ${PATCHIT_AGENT_MODE:-cursor}
       PATCHIT_INHOUSE_AGENT_URL: ${PATCHIT_INHOUSE_AGENT_URL}
       PATCHIT_INHOUSE_API_KEY: ${PATCHIT_INHOUSE_API_KEY}
       PATCHIT_INHOUSE_HEADERS_JSON: ${PATCHIT_INHOUSE_HEADERS_JSON}
@@ -25,6 +29,10 @@ services:
       - ../var:/opt/patchit/var
       # Mount your checked-out repo so PATCHIT can index + patch it in local-worktree mode.
       - ../:/opt/patchit/repo:rw
+      # Mount external lab repos for multi-repo remediation.
+      - /Users/ankurchopra/repo_projects/patchit-databricks-labs:/opt/patchit/repo/patchit-databricks-labs:rw
+      - /Users/ankurchopra/repo_projects/patchit-snowflake-labs:/opt/patchit/repo/patchit-snowflake-labs:rw
+      - /Users/ankurchopra/repo_projects/patchit-aws-labs:/opt/patchit/repo/patchit-aws-labs:rw
       # Optional: allow local worktree + docker-based validation from inside PATCHIT container (macOS needs correct socket).
       # - /var/run/docker.sock:/var/run/docker.sock
     ports:
@@ -35,6 +43,8 @@ services:
     build:
       context: ..
       dockerfile: agent_service/Dockerfile
+      args:
+        BASE_REGISTRY: ${PATCHIT_IMAGE_REGISTRY:-docker.io/library}
     environment:
       BYTEZ_API_KEY: ${BYTEZ_API_KEY}
       BYTEZ_MODEL: "anthropic/claude-sonnet-4-5"

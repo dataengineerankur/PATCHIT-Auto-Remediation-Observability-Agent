@@ -1,4 +1,5 @@
-FROM node:20-slim
+ARG BASE_REGISTRY=docker.io/library
+FROM ${BASE_REGISTRY}/node:20-slim
 
 WORKDIR /opt/agent
 COPY agent_service/package.json /opt/agent/package.json

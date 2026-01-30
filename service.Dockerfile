@@ -1,6 +1,8 @@
-FROM docker:27.1.1-cli AS dockercli
+ARG BASE_REGISTRY=docker.io/library
+FROM ${BASE_REGISTRY}/docker:27.1.1-cli AS dockercli
 
-FROM python:3.11-slim
+ARG BASE_REGISTRY=docker.io/library
+FROM ${BASE_REGISTRY}/python:3.11-slim
 
 WORKDIR /opt/patchit
 COPY pyproject.toml /opt/patchit/pyproject.toml
@@ -25,7 +27,8 @@ RUN pip install -U pip && pip install \
   PyYAML==6.0.2 \
   pytest==8.3.4 \
   dbt-core==1.9.0 \
-  dbt-duckdb==1.9.1
+  dbt-duckdb==1.9.1 \
+  snowflake-connector-python==3.12.4
 
 # Copy source last so dependency layers remain cached during rapid iteration.
 COPY patchit /opt/patchit/patchit
