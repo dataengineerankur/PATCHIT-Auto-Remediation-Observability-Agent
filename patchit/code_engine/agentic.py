@@ -128,6 +128,7 @@ class AgenticCodeEngine:
 
         diff = _sanitize_unified_diff(diff)
         diff = _canonicalize_diff_paths(diff)
+        diff = _repair_new_file_diff_missing_hunks(diff)
         if not diff or "diff --git" not in diff and "--- a/" not in diff:
             return None
 
@@ -139,7 +140,10 @@ class AgenticCodeEngine:
             if "corrupt patch" in fb or "malformed patch" in fb or "patch fragment without header" in fb or "misordered hunks" in fb:
                 force_structured = True
 
-        if force_structured or (not _looks_like_real_unified_diff(diff)):
+        if not force_structured and _has_basic_hunks(diff):
+            # Accept basic hunks even if stricter heuristics fail.
+            pass
+        elif force_structured or (not _looks_like_real_unified_diff(diff)):
             # Fallback (task-agnostic): ask for a structured patch and synthesize a real unified diff ourselves.
             synthesized = self._synthesize_diff_from_structured_patch(
                 event=event,
@@ -153,7 +157,11 @@ class AgenticCodeEngine:
             if synthesized:
                 diff = synthesized
             else:
-                raise RuntimeError(f"invalid_diff_format: missing_hunks\nhead={diff[:400]!r}\ntail={diff[-400:]!r}")
+                # If we still have explicit hunks and file headers, accept the raw diff.
+                if _has_basic_hunks(diff):
+                    pass
+                else:
+                    raise RuntimeError(f"invalid_diff_format: missing_hunks\nhead={diff[:400]!r}\ntail={diff[-400:]!r}")
 
         files = _extract_files_from_diff(diff)
         if not files:
@@ -236,7 +244,27 @@ class AgenticCodeEngine:
             if r.status_code != 200:
                 raise RuntimeError(f"inhouse_http_{r.status_code}: {r.text[:1200]}")
             body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
-        return (body or {}).get("diff") or (body or {}).get("patch") or ""
+        if not isinstance(body, dict):
+            return ""
+        diff_text = body.get("diff") or body.get("patch")
+        if isinstance(diff_text, str) and diff_text.strip():
+            return diff_text
+        # Fallback for OpenAI-style completions/chat responses.
+        choices = body.get("choices")
+        if isinstance(choices, list):
+            texts: list[str] = []
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                if isinstance(choice.get("text"), str):
+                    texts.append(choice["text"])
+                    continue
+                message = choice.get("message")
+                if isinstance(message, dict) and isinstance(message.get("content"), str):
+                    texts.append(message["content"])
+            merged = "\n".join(t.strip() for t in texts if isinstance(t, str) and t.strip())
+            return merged
+        return ""
 
     def _cursor_propose_diff(self, *, payload: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
         """
@@ -565,7 +593,8 @@ _UNWANTED_DIFF_PATH_RE = re.compile(
     r"\.(pyc|pyo|pyd)$|"
     r"(^|/)([^/]+\.(egg-info|dist-info))(/|$)|"
     r"(^|/)(logs|pgdata|var|target)(/|$)|"
-    r"(^|/)\.env(\.|$)",
+    r"(^|/)\.env(\.|$)|"
+    r"(^|/)\.gitignore$",
     flags=re.IGNORECASE,
 )
 
@@ -632,12 +661,77 @@ def _canonicalize_diff_paths(diff: str) -> str:
     return out
 
 
+def _has_basic_hunks(diff: str) -> bool:
+    if not diff:
+        return False
+    has_hunk = "@@ " in diff
+    has_new_file_header = ("new file mode" in diff) and ("--- /dev/null" in diff) and ("+++ b/" in diff)
+    has_regular_header = ("--- a/" in diff) and ("+++ b/" in diff)
+    return has_hunk and (has_regular_header or has_new_file_header)
+
+
+def _repair_new_file_diff_missing_hunks(diff: str) -> str:
+    """
+    Some providers return "new file mode" blocks without @@ hunks.
+    Convert those into valid unified diff hunks so git/patch can apply them.
+    """
+    if not diff or "diff --git " not in diff:
+        return diff
+
+    blocks: List[str] = []
+    cur: List[str] = []
+
+    def _flush(block: List[str]) -> None:
+        if not block:
+            return
+        has_new_file = any("new file mode" in ln for ln in block)
+        has_dev_null = any(ln.startswith("--- /dev/null") for ln in block)
+        has_b_header = any(ln.startswith("+++ b/") for ln in block)
+        has_hunk = any(_is_valid_unified_hunk_header(ln) for ln in block)
+        if has_new_file and has_dev_null and has_b_header and not has_hunk:
+            header: List[str] = []
+            content: List[str] = []
+            seen_b = False
+            for ln in block:
+                header.append(ln)
+                if ln.startswith("+++ b/"):
+                    seen_b = True
+                    continue
+                if seen_b:
+                    # Remaining lines are file content; normalize to added lines.
+                    if ln.startswith("+"):
+                        content.append(ln)
+                    else:
+                        content.append("+" + ln)
+            if content:
+                hunk = [f"@@ -0,0 +1,{len(content)} @@"]
+                block = header + hunk + content
+        blocks.append("\n".join(block))
+
+    for ln in diff.splitlines():
+        if ln.startswith("diff --git "):
+            _flush(cur)
+            cur = [ln]
+        else:
+            cur.append(ln)
+    _flush(cur)
+
+    out = "\n".join([b for b in blocks if b.strip()]).strip()
+    if out and not out.endswith("\n"):
+        out += "\n"
+    return out
+
+
 def _looks_like_real_unified_diff(diff: str) -> bool:
     """
     Require actual file headers and at least one hunk; otherwise tools like `git apply` will reject it.
     """
     lines = diff.splitlines()
-    has_file_headers = any(l.startswith("--- a/") for l in lines) and any(l.startswith("+++ b/") for l in lines)
+    has_regular_headers = any(l.startswith("--- a/") for l in lines) and any(l.startswith("+++ b/") for l in lines)
+    has_new_file_headers = ("new file mode" in diff) and any(l.startswith("--- /dev/null") for l in lines) and any(
+        l.startswith("+++ b/") for l in lines
+    )
+    has_file_headers = has_regular_headers or has_new_file_headers
 
     # Unified diff hunks must look like: @@ -l,s +l,s @@
     has_valid_hunk = any(_is_valid_unified_hunk_header(l) for l in lines)
