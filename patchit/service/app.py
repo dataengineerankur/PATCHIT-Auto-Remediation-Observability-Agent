@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import hashlib
 import json
@@ -165,6 +166,7 @@ def _sanitize_runtime_config(cfg: dict[str, Any]) -> dict[str, Any]:
         "openrouter_api_key",
         "groq_api_key",
         "databricks_token",
+        "snowflake_password",
     ):
         if k in c:
             c[k] = "***"
@@ -257,12 +259,68 @@ def _effective_report_agent_mode(settings: Settings) -> str:
     ReportAgent is LLM-backed but does NOT support Cursor Cloud Agents.
     Even if patching uses Cursor, report generation should fall back to OpenRouter/Groq.
     """
+    if getattr(settings, "cursor_api_key", None) and getattr(settings, "cursor_repository", None):
+        return "cursor"
     if getattr(settings, "openrouter_api_key", None):
         return "openrouter"
     if getattr(settings, "groq_api_key", None):
         return "groq"
     # No credentials: keep deterministic report rendering (will raise if called).
     return "openrouter"
+
+
+def _build_basic_report(
+    *,
+    event: UniversalFailureEvent,
+    error_fingerprint: str,
+    err: NormalizedErrorObject,
+    reason: str | None = None,
+) -> RootCauseReport:
+    msg = (err.message or "").lower()
+    err_type = (err.error_type or "").lower()
+    category = RootCauseCategory.unknown
+    steps = [
+        "Re-run the failing task with full logs enabled (stack trace and file/line numbers).",
+        "Confirm the repository is mounted and indexable by PATCHIT.",
+        "If this is reproducible, attach the raw error output to the incident for analysis.",
+    ]
+    if "schema drift" in msg or "missing column" in msg or "missing field" in msg:
+        category = RootCauseCategory.data_issue
+        steps = [
+            "Check the upstream schema to confirm whether the missing field/column was removed or renamed.",
+            "If the column should exist, re-run upstream ingestion or fix the source pipeline.",
+            "If the schema changed, update the transformation/model to handle the new field name or default value.",
+            "Add schema validation to detect drift earlier in the pipeline.",
+        ]
+    elif "keyerror" in err_type or "keyerror" in msg:
+        category = RootCauseCategory.data_issue
+        steps = [
+            "Inspect the payload schema for the missing key and verify upstream contracts.",
+            "Add defensive access (e.g., `.get`) with explicit contract errors for missing keys.",
+            "Update downstream logic to handle optional fields gracefully.",
+        ]
+    elif "filenotfound" in err_type or "file not found" in msg:
+        category = RootCauseCategory.env_mismatch
+        steps = [
+            "Verify the file path exists and is mounted into the runtime environment.",
+            "Ensure upstream tasks write artifacts to the expected path before this task runs.",
+            "Add a clear preflight check for required files/directories.",
+        ]
+    notes = (reason or "").strip()
+    if notes:
+        notes = f"ReportAgent unavailable: {notes}"
+    return RootCauseReport(
+        event_id=event.event_id,
+        pipeline_id=event.pipeline_id,
+        run_id=event.run_id,
+        task_id=event.task_id,
+        error_fingerprint=error_fingerprint,
+        failure_summary=(err.message or err.raw_excerpt or "Root cause analysis unavailable.").strip(),
+        category=category,
+        recommended_next_steps=steps,
+        timeline=[],
+        notes=notes or "Set OPENROUTER_API_KEY or GROQ_API_KEY to enable full LLM-generated RCA reports.",
+    )
 
 
 # ---------- Poller startup ----------
@@ -503,14 +561,38 @@ async def inhouse_test(request: Request) -> JSONResponse:
     api_key = str(body.get("inhouse_api_key") or "").strip()
     if api_key and "Authorization" not in headers:
         headers["Authorization"] = f"Bearer {api_key}"
-    payload = {"event": {"event_id": "patchit:test", "platform": "airflow", "pipeline_id": "test", "run_id": "test"}, "normalized_error": {"message": "test"}, "code_context": {}, "artifact_summaries": [], "codebase_index": {}}
+    payload = {
+        "event": {"event_id": "patchit:test", "platform": "airflow", "pipeline_id": "test", "run_id": "test"},
+        "normalized_error": {"message": "test"},
+        "code_context": {},
+        "artifact_summaries": [],
+        "codebase_index": {},
+    }
+    openai_style_payload = {
+        "model": "gpt-5",
+        "prompt": "PATCHIT inhouse connectivity test. Reply with OK.",
+    }
+    url_lower = url.lower()
+    prefer_openai_payload = "completions" in url_lower or "chat" in url_lower
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.post(url, json=payload, headers=headers)
+            if prefer_openai_payload:
+                r = await client.post(url, json=openai_style_payload, headers=headers)
+            else:
+                r = await client.post(url, json=payload, headers=headers)
+        if r.status_code != 200 and not prefer_openai_payload:
+            # Fallback to OpenAI-style payload for inhouse proxies expecting completions-style input.
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.post(url, json=openai_style_payload, headers=headers)
         if r.status_code != 200:
             return JSONResponse({"ok": False, "error": f"http_{r.status_code}", "body": r.text[:500]}, status_code=400)
         data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
         has_patch = bool((data or {}).get("diff") or (data or {}).get("patch"))
+        # Accept OpenAI-style responses as successful tests.
+        if not has_patch and isinstance(data, dict):
+            choices = data.get("choices")
+            if isinstance(choices, list) and choices:
+                has_patch = True
         return JSONResponse({"ok": True, "has_patch": has_patch})
     except Exception as e:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
@@ -542,6 +624,240 @@ async def databricks_test(request: Request) -> JSONResponse:
         return JSONResponse({"ok": True, "jobs_visible": isinstance(jobs, list), "sample": data})
     except Exception as e:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+@app.post("/api/databricks/trigger_test")
+async def databricks_trigger_test(request: Request) -> JSONResponse:
+    """
+    Trigger a Databricks job by name, pull run output, and POST to PATCHIT ingest automatically.
+    """
+    settings: Settings = request.app.state.settings
+    cfg = _load_runtime_config(settings)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    host = str((body.get("databricks_host") or cfg.get("databricks_host") or "")).strip().rstrip("/")
+    token = str((body.get("databricks_token") or cfg.get("databricks_token") or "")).strip()
+    job_name = str((body.get("databricks_job_name") or cfg.get("databricks_job_name") or "")).strip()
+    if not (host and token and job_name):
+        return JSONResponse({"ok": False, "error": "missing_databricks_host_token_or_job_name"}, status_code=400)
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            jobs_resp = await client.get(f"{host}/api/2.1/jobs/list?limit=100", headers=headers)
+            if jobs_resp.status_code != 200:
+                return JSONResponse({"ok": False, "error": f"jobs_list_http_{jobs_resp.status_code}", "body": jobs_resp.text[:500]}, status_code=400)
+            jobs = (jobs_resp.json() or {}).get("jobs") or []
+            job_id = None
+            for j in jobs:
+                if isinstance(j, dict) and (j.get("settings") or {}).get("name") == job_name:
+                    job_id = j.get("job_id")
+                    break
+            if not job_id:
+                return JSONResponse({"ok": False, "error": "job_name_not_found"}, status_code=400)
+            run_resp = await client.post(f"{host}/api/2.1/jobs/run-now", headers=headers, json={"job_id": job_id})
+            if run_resp.status_code != 200:
+                return JSONResponse({"ok": False, "error": f"run_now_http_{run_resp.status_code}", "body": run_resp.text[:500]}, status_code=400)
+            run_id = (run_resp.json() or {}).get("run_id")
+            if not run_id:
+                return JSONResponse({"ok": False, "error": "run_id_missing"}, status_code=400)
+            # Poll a short time for completion
+            state = {}
+            for _ in range(20):
+                status = await client.get(f"{host}/api/2.1/jobs/runs/get?run_id={run_id}", headers=headers)
+                if status.status_code != 200:
+                    break
+                state = (status.json() or {}).get("state") or {}
+                if state.get("life_cycle_state") in ("TERMINATED", "INTERNAL_ERROR", "SKIPPED"):
+                    break
+                await asyncio.sleep(3.0)
+            output = await client.get(f"{host}/api/2.1/jobs/runs/get-output?run_id={run_id}", headers=headers)
+            output_json = output.json() if output.status_code == 200 else {}
+
+            # For multi-task jobs, fetch per-task outputs (if available) for richer errors.
+            task_outputs = []
+            tasks = (status.json() or {}).get("tasks") if status.status_code == 200 else []
+            if isinstance(tasks, list):
+                for task in tasks[:4]:
+                    task_run_id = (task or {}).get("run_id")
+                    if not task_run_id:
+                        continue
+                    task_out = await client.get(
+                        f"{host}/api/2.1/jobs/runs/get-output?run_id={task_run_id}",
+                        headers=headers,
+                    )
+                    if task_out.status_code != 200:
+                        continue
+                    task_outputs.append(task_out.json() or {})
+
+        result_state = (state or {}).get("result_state")
+        error_summary = (state or {}).get("state_message") or ""
+
+        def _extract_log(payload: dict) -> str:
+            if not isinstance(payload, dict):
+                return ""
+            # Common fields for errors/logs
+            for key in ("error", "logs"):
+                val = payload.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            # Notebook output can carry exception text in result
+            nb_out = payload.get("notebook_output") or {}
+            if isinstance(nb_out, dict):
+                result = nb_out.get("result")
+                if isinstance(result, str) and result.strip():
+                    return result.strip()
+            return ""
+
+        log_parts = []
+        main_log = _extract_log(output_json)
+        if main_log:
+            log_parts.append(main_log)
+        if error_summary:
+            log_parts.append(error_summary)
+        for t in task_outputs:
+            t_log = _extract_log(t)
+            if t_log and t_log not in log_parts:
+                log_parts.append(t_log)
+        log_excerpt = "\n".join(log_parts).strip()
+        if not log_excerpt:
+            log_excerpt = "Databricks run completed; no error output captured."
+        # Only post to PATCHIT if run failed
+        if result_state and result_state != "FAILED":
+            return JSONResponse({"ok": False, "error": f"run_not_failed:{result_state}", "run_id": run_id, "job_id": job_id})
+
+        hint_paths: list[str] = []
+        job_name_l = job_name.lower()
+        if "ingest" in job_name_l:
+            hint_paths.append("notebooks/ingest_notebook.py")
+        if "quality" in job_name_l:
+            hint_paths.append("notebooks/quality_notebook.py")
+        if "dedup" in job_name_l:
+            hint_paths.append("notebooks/dedup_notebook.py")
+        metadata = {"databricks_host": host, "log_text": log_excerpt}
+        if hint_paths:
+            metadata["repo_hint_paths"] = hint_paths
+        event = UniversalFailureEvent(
+            event_id=f"databricks:job:{job_id}:{run_id}",
+            platform="databricks",
+            pipeline_id=f"databricks:{job_name}",
+            run_id=str(run_id),
+            task_id="job_run",
+            log_uri=None,
+            metadata=metadata,
+        )
+        _ = ingest(event, request)
+        return JSONResponse({"ok": True, "run_id": run_id, "job_id": job_id})
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+@app.post("/api/snowflake/test")
+async def snowflake_test(request: Request) -> JSONResponse:
+    """
+    Snowflake connector sanity check.
+    Uses snowflake-connector-python if available.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    account = str(body.get("snowflake_account") or "").strip()
+    user = str(body.get("snowflake_user") or "").strip()
+    role = str(body.get("snowflake_role") or "").strip()
+    warehouse = str(body.get("snowflake_warehouse") or "").strip()
+    database = str(body.get("snowflake_database") or "").strip()
+    schema = str(body.get("snowflake_schema") or "").strip()
+    password = str(body.get("snowflake_password") or "").strip()
+    key_path = str(body.get("snowflake_private_key_path") or "").strip()
+    if not (account and user and role and warehouse):
+        return JSONResponse({"ok": False, "error": "missing_required_fields"}, status_code=400)
+    if key_path and not password:
+        return JSONResponse({"ok": False, "error": "private_key_auth_not_supported_in_test"}, status_code=400)
+    try:
+        import snowflake.connector  # type: ignore
+    except Exception:
+        return JSONResponse({"ok": False, "error": "snowflake_connector_missing"}, status_code=400)
+    try:
+        conn = snowflake.connector.connect(
+            account=account,
+            user=user,
+            role=role,
+            warehouse=warehouse,
+            database=database or None,
+            schema=schema or None,
+            password=password or None,
+        )
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT 1")
+            _ = cur.fetchone()
+        finally:
+            cur.close()
+            conn.close()
+        return JSONResponse({"ok": True})
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+@app.post("/api/snowflake/trigger_test")
+async def snowflake_trigger_test(request: Request) -> JSONResponse:
+    """
+    Run a failing Snowflake query to generate an error and POST to PATCHIT ingest automatically.
+    """
+    settings: Settings = request.app.state.settings
+    cfg = _load_runtime_config(settings)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    account = str(body.get("snowflake_account") or cfg.get("snowflake_account") or "").strip()
+    user = str(body.get("snowflake_user") or cfg.get("snowflake_user") or "").strip()
+    role = str(body.get("snowflake_role") or cfg.get("snowflake_role") or "").strip()
+    warehouse = str(body.get("snowflake_warehouse") or cfg.get("snowflake_warehouse") or "").strip()
+    database = str(body.get("snowflake_database") or cfg.get("snowflake_database") or "").strip()
+    schema = str(body.get("snowflake_schema") or cfg.get("snowflake_schema") or "").strip()
+    password = str(body.get("snowflake_password") or cfg.get("snowflake_password") or "").strip()
+    if not (account and user and role and warehouse and database and schema):
+        return JSONResponse({"ok": False, "error": "missing_required_fields"}, status_code=400)
+    try:
+        import snowflake.connector  # type: ignore
+    except Exception:
+        return JSONResponse({"ok": False, "error": "snowflake_connector_missing"}, status_code=400)
+    try:
+        conn = snowflake.connector.connect(
+            account=account,
+            user=user,
+            role=role,
+            warehouse=warehouse,
+            database=database,
+            schema=schema,
+            password=password or None,
+        )
+        cur = conn.cursor()
+        try:
+            # Intentional failure: references a non-existent column
+            cur.execute("SELECT NON_EXISTENT_COL FROM RAW_EVENTS LIMIT 1")
+        finally:
+            cur.close()
+            conn.close()
+        return JSONResponse({"ok": False, "error": "query_did_not_fail"}, status_code=400)
+    except Exception as e:  # noqa: BLE001
+        log_excerpt = str(e)
+        event = UniversalFailureEvent(
+            event_id="snowflake:test:1",
+            platform="snowflake",
+            pipeline_id="snowflake:patchit",
+            run_id="manual__1",
+            task_id="snowflake_query",
+            log_uri=None,
+            metadata={"log_text": log_excerpt, "database": database, "schema": schema},
+        )
+        _ = ingest(event, request)
+        return JSONResponse({"ok": True})
 
 
 @app.get("/api/audit/stream")
@@ -726,6 +1042,86 @@ async def runtime_config_set(request: Request) -> JSONResponse:
                 cfg["databricks_token"] = v
             else:
                 cfg.pop("databricks_token", None)
+    if "databricks_job_name" in body:
+        v = body.get("databricks_job_name")
+        if isinstance(v, str):
+            v = v.strip()
+            if v:
+                cfg["databricks_job_name"] = v
+            else:
+                cfg.pop("databricks_job_name", None)
+    if "databricks_job_name" in body:
+        v = body.get("databricks_job_name")
+        if isinstance(v, str):
+            v = v.strip()
+            if v:
+                cfg["databricks_job_name"] = v
+            else:
+                cfg.pop("databricks_job_name", None)
+    if "snowflake_account" in body:
+        v = body.get("snowflake_account")
+        if isinstance(v, str):
+            v = v.strip()
+            if v:
+                cfg["snowflake_account"] = v
+            else:
+                cfg.pop("snowflake_account", None)
+    if "snowflake_user" in body:
+        v = body.get("snowflake_user")
+        if isinstance(v, str):
+            v = v.strip()
+            if v:
+                cfg["snowflake_user"] = v
+            else:
+                cfg.pop("snowflake_user", None)
+    if "snowflake_role" in body:
+        v = body.get("snowflake_role")
+        if isinstance(v, str):
+            v = v.strip()
+            if v:
+                cfg["snowflake_role"] = v
+            else:
+                cfg.pop("snowflake_role", None)
+    if "snowflake_warehouse" in body:
+        v = body.get("snowflake_warehouse")
+        if isinstance(v, str):
+            v = v.strip()
+            if v:
+                cfg["snowflake_warehouse"] = v
+            else:
+                cfg.pop("snowflake_warehouse", None)
+    if "snowflake_database" in body:
+        v = body.get("snowflake_database")
+        if isinstance(v, str):
+            v = v.strip()
+            if v:
+                cfg["snowflake_database"] = v
+            else:
+                cfg.pop("snowflake_database", None)
+    if "snowflake_schema" in body:
+        v = body.get("snowflake_schema")
+        if isinstance(v, str):
+            v = v.strip()
+            if v:
+                cfg["snowflake_schema"] = v
+            else:
+                cfg.pop("snowflake_schema", None)
+    if "snowflake_password" in body:
+        v = body.get("snowflake_password")
+        if isinstance(v, str):
+            v = v.strip()
+            if v:
+                cfg["snowflake_password"] = v
+            else:
+                cfg.pop("snowflake_password", None)
+    if "snowflake_private_key_path" in body:
+        v = body.get("snowflake_private_key_path")
+        if isinstance(v, str):
+            v = v.strip()
+            if v:
+                cfg["snowflake_private_key_path"] = v
+            else:
+                cfg.pop("snowflake_private_key_path", None)
     _save_runtime_config(settings, cfg)
     return JSONResponse({"ok": True, "config": cfg, "effective_agent_mode": _effective_agent_mode(settings)})
 
@@ -906,7 +1302,24 @@ def ingest(event: UniversalFailureEvent, request: Request) -> RemediationResult:
             )
             audit.write(correlation_id, "report.saved", {"report_id": report_id, "path": saved})
         except Exception as e:  # noqa: BLE001
-            audit.write(correlation_id, "report.save_failed", {"error": str(e)})
+            audit.write(correlation_id, "report.save_failed", {"error": str(e), "fallback": "basic_report"})
+            report = _build_basic_report(
+                event=event,
+                error_fingerprint=error_fingerprint,
+                err=err,
+                reason=str(e),
+            )
+            audit.write(correlation_id, "remediation.escalated", {"report": report.model_dump(mode="json")})
+            try:
+                report_id = f"{correlation_id}.agent_failed_fallback"
+                rp = _persist_report_md(
+                    report_id=report_id,
+                    md_text=render_root_cause_report_md(report=report, title="PATCHIT Report: Agent could not produce a patch"),
+                    store_dir=settings.report_store_dir,
+                )
+                audit.write(correlation_id, "report.saved", {"report_id": report_id, "path": rp})
+            except Exception as e2:  # noqa: BLE001
+                audit.write(correlation_id, "report.save_failed", {"error": str(e2), "fallback": "basic_report"})
 
         decision = PolicyEngine(RemediationPolicy(require_human_approval=True)).evaluate_patch(
             PatchProposal(
@@ -1073,21 +1486,27 @@ def ingest(event: UniversalFailureEvent, request: Request) -> RemediationResult:
                 audit_correlation_id=correlation_id,
             )
 
-    if not event.log_uri:
+    inline_log = None
+    if isinstance(event.metadata, dict):
+        inline_log = event.metadata.get("log_text")
+    if not event.log_uri and not inline_log:
         raise HTTPException(status_code=400, detail="log_uri is required for Phase-1 MVP")
 
-    # Fetch logs
-    fetcher = LogFetcher(
-        timeout_s=15.0,
-        translate_from=settings.file_translate_from,
-        translate_to=settings.file_translate_to,
-        attempt_fallback=True,
-    )
-    try:
-        log_text = fetcher.fetch(event.log_uri)
-    except Exception as e:  # noqa: BLE001 (service boundary)
-        audit.write(correlation_id, "log.fetch_failed", {"log_uri": event.log_uri, "error": str(e)})
-        raise HTTPException(status_code=400, detail=f"Could not fetch logs: {e}") from e
+    if inline_log:
+        log_text = str(inline_log)
+    else:
+        # Fetch logs
+        fetcher = LogFetcher(
+            timeout_s=15.0,
+            translate_from=settings.file_translate_from,
+            translate_to=settings.file_translate_to,
+            attempt_fallback=True,
+        )
+        try:
+            log_text = fetcher.fetch(event.log_uri)
+        except Exception as e:  # noqa: BLE001 (service boundary)
+            audit.write(correlation_id, "log.fetch_failed", {"log_uri": event.log_uri, "error": str(e)})
+            raise HTTPException(status_code=400, detail=f"Could not fetch logs: {e}") from e
 
     audit.write(correlation_id, "log.fetched", {"bytes": len(log_text.encode('utf-8'))})
 
@@ -1562,6 +1981,67 @@ def ingest(event: UniversalFailureEvent, request: Request) -> RemediationResult:
     except Exception:  # noqa: BLE001
         pass
 
+    # Fast-path escalation: logs are non-actionable (common for Databricks before a task starts).
+    try:
+        raw = (err.raw_excerpt or "").lower()
+        if "no output is available until the task begins" in raw:
+            report = RootCauseReport(
+                event_id=event.event_id,
+                pipeline_id=event.pipeline_id,
+                run_id=event.run_id,
+                task_id=event.task_id,
+                error_fingerprint=error_fingerprint,
+                failure_summary=(
+                    "PATCHIT could not extract a real exception from logs. The runtime reported: "
+                    "\"No output is available until the task begins.\""
+                ),
+                category=RootCauseCategory.infra_issue,
+                recommended_next_steps=[
+                    "Re-run the Databricks job and wait for a failed task log that includes a stack trace.",
+                    "Ensure the job finishes and the task output is available before ingestion.",
+                    "If using PATCHIT trigger_test, increase polling wait or re-run after the task reaches FAILED.",
+                ],
+                timeline=[],
+                notes="PATCHIT skipped patch generation because the logs were non-actionable.",
+            )
+            audit.write(correlation_id, "remediation.escalated", {"report": report.model_dump(mode="json")})
+            try:
+                report_id = f"{correlation_id}.no_actionable_logs"
+                saved = _persist_report_md(
+                    report_id=report_id,
+                    md_text=render_root_cause_report_md(report=report, title="PATCHIT Report: No actionable logs"),
+                    store_dir=settings.report_store_dir,
+                )
+                audit.write(correlation_id, "report.saved", {"report_id": report_id, "path": saved})
+            except Exception as e:  # noqa: BLE001
+                audit.write(correlation_id, "report.save_failed", {"error": str(e)})
+
+            decision = PolicyEngine(RemediationPolicy(require_human_approval=True)).evaluate_patch(
+                PatchProposal(
+                    patch_id="none",
+                    title="escalated: no actionable logs",
+                    rationale="log excerpt indicates no task output yet",
+                    diff_unified="",
+                    files=[],
+                    confidence=0.0,
+                    requires_human_approval=True,
+                )
+            )
+            decision.allowed = False
+            decision.reasons = ["escalated: no_actionable_logs", f"fingerprint={error_fingerprint}"]
+            audit.write(correlation_id, "policy.decided", {"decision": decision.model_dump(mode="json"), "phase": "final"})
+            return RemediationResult(
+                event=event,
+                error=err,
+                patch=None,
+                policy=decision,
+                pr=None,
+                report=report,
+                audit_correlation_id=correlation_id,
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
     # Inspect artifacts to strengthen root-cause (and infer upstream task when downstream fails)
     artifact_summaries = summarize_artifacts(event.artifact_uris)
     audit.write(
@@ -1925,6 +2405,27 @@ def ingest(event: UniversalFailureEvent, request: Request) -> RemediationResult:
                         ctx[rp] = {"line": 1, "function": "(file)", "snippet": snippet}
                     except Exception:
                         continue
+        # Attach repo hint paths (platform integrations can supply these).
+        try:
+            hints = None
+            if isinstance(event.metadata, dict):
+                hints = event.metadata.get("repo_hint_paths") or event.metadata.get("repo_hint_path")
+            if isinstance(hints, str):
+                hints = [hints]
+            if isinstance(hints, list):
+                cleaned: list[str] = []
+                for h in hints:
+                    if not isinstance(h, str):
+                        continue
+                    hp = h.strip().lstrip("/")
+                    # Only allow repo-relative paths and block traversal.
+                    if not hp or ".." in hp or ":" in hp:
+                        continue
+                    cleaned.append(hp)
+                if cleaned:
+                    ctx.update(collector.collect_files(cleaned))
+        except Exception:  # noqa: BLE001
+            pass
     except Exception:  # noqa: BLE001
         pass
     audit.write(correlation_id, "context.collected", {"files": list(ctx.keys())})
@@ -2875,6 +3376,13 @@ def ingest(event: UniversalFailureEvent, request: Request) -> RemediationResult:
                 openrouter_model=settings.openrouter_model,
                 openrouter_site_url=settings.openrouter_site_url,
                 openrouter_site_name=settings.openrouter_site_name,
+                cursor_api_key=settings.cursor_api_key,
+                cursor_base_url=settings.cursor_base_url,
+                cursor_repository=settings.cursor_repository,
+                cursor_ref=settings.cursor_ref or settings.github_base_branch,
+                cursor_branch_prefix=settings.cursor_branch_prefix,
+                cursor_poll_interval_s=settings.cursor_poll_interval_s,
+                cursor_max_wait_s=settings.cursor_max_wait_s,
                 timeout_s=min(60.0, float(settings.agent_attempt_timeout_s)),
             )
             report = reporter.generate(
